@@ -6,6 +6,7 @@ import (
 
 type LoadBalancerAlgo interface {
 	FindServer() server.Server
+	PerformHealthChecks()
 }
 
 type LoadBalancer interface {
@@ -15,3 +16,4 @@ type LoadBalancer interface {
 	RemoveServer(serverName string)
 	LoadBalancerAlgo
 }
+

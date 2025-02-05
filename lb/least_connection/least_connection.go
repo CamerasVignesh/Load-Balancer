@@ -6,11 +6,18 @@ import (
 	randomgen "load-balancer/random_gen"
 	"load-balancer/server"
 	"net/http"
+	"sync"
+	"time"
 )
 
 type loadBalancerImpl struct {
 	servers []server.Server
+	mu sync.RWMutex
+	done chan struct{}
+	isServerHealthy map[string]bool
 }
+
+const serverHealthCheckURLPatten = "http://localhost:%s/health"
 
 func NewLeastConnectionLoadBalancer(count int) lb.LoadBalancer {
 	servers := []server.Server{}
@@ -22,42 +29,80 @@ func NewLeastConnectionLoadBalancer(count int) lb.LoadBalancer {
 	}
 	return &loadBalancerImpl {
 		servers: servers,
+		done: make(chan struct{}),
+		isServerHealthy: make(map[string]bool),
 	}
 }
 
+func (lb *loadBalancerImpl) updateServerHealth (serverPort string) {
+	healthCheckURL := fmt.Sprintf(serverHealthCheckURLPatten, serverPort)
+	resp, err := http.Get(healthCheckURL)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		fmt.Printf("Server %s is unhealthy\n", serverPort)
+		lb.isServerHealthy[serverPort] = false
+		return
+	}
+	fmt.Printf("Server %s is HEALTHY\n", serverPort)
+	lb.isServerHealthy[serverPort] = true
+}
+
+
 func (lb *loadBalancerImpl) FindServer() server.Server {
-	minServer := lb.servers[0]
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	var minServer server.Server
 	for _, server := range lb.servers {
-		if(server.GetActiveConnections() < minServer.GetActiveConnections()) {
+		if !lb.isServerHealthy[server.GetName()] {
+			continue
+		}
+		if minServer == nil ||  server.GetActiveConnections() < minServer.GetActiveConnections(){
 			minServer = server
 		}
 	}
 	return minServer
 }
 
+func (lb *loadBalancerImpl) PerformHealthChecks() {
+	for _, server := range lb.servers {
+		lb.updateServerHealth(server.GetName())
+	}
+}
+
 func (lb *loadBalancerImpl) handleRequest(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, "Request received to round robin LB")
+	fmt.Fprintln(w, "Request received to least connection LB")
 
 	server := lb.FindServer()
 	server.HandleRequest(w, r)
 }
 
 func (lb *loadBalancerImpl) Start(port string) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", lb.handleRequest)
-	go func() {
-		http.ListenAndServe(":" + port, mux)
-	}()
-
 	for _,server := range lb.servers {
 		server.Start()
 	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", lb.handleRequest)
+	go http.ListenAndServe(":" + port, mux)
+	go func() {
+		for {
+			select {
+			case <-lb.done:
+				fmt.Println("done called for least connection load balancer")
+				return
+			default:
+				lb.PerformHealthChecks()
+				time.Sleep(5 * time.Second)
+			}
+		}
+		
+	}()
 }
 
 func (lb *loadBalancerImpl) Stop() {
 	for _,server := range lb.servers {
 		server.Stop()
 	}
+	lb.done <- struct{}{}
 }
 
 func (lb *loadBalancerImpl) AddServer(backendServer server.Server) {
@@ -74,6 +119,3 @@ func (lb *loadBalancerImpl) RemoveServer(serverName string) {
 	}
 	lb.servers = servers
 }
-
-
-

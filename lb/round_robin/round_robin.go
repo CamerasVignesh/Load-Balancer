@@ -6,12 +6,17 @@ import (
 	"load-balancer/server"
 	"load-balancer/lb"
 	"load-balancer/random_gen"
+	"time"
 )
 
 type loadBalancerImpl struct {
 	servers []server.Server
 	serverIndex int
+	done chan struct{}
+	isServerHealthy map[string]bool
 }
+
+const serverHealthCheckURLPatten = "http://localhost:%s/health"
 
 
 func NewRoundRobinLoadBalancer(count int) lb.LoadBalancer {
@@ -24,15 +29,24 @@ func NewRoundRobinLoadBalancer(count int) lb.LoadBalancer {
 	}
 	return &loadBalancerImpl{
 		servers: servers,
+		done: make(chan struct{}),
+		isServerHealthy: make(map[string]bool),
 	}
 }
 
 func (lb *loadBalancerImpl) FindServer() server.Server {
-	lb.serverIndex++
-	if lb.serverIndex >= len(lb.servers) {
-		lb.serverIndex %= len(lb.servers)
+	counter := 0
+	for counter < len(lb.servers){
+		lb.serverIndex++
+		if lb.serverIndex >= len(lb.servers) {
+			lb.serverIndex %= len(lb.servers)
+		}
+		if lb.isServerHealthy[lb.servers[lb.serverIndex].GetName()] {
+			return lb.servers[lb.serverIndex]
+		}
+		counter++
 	}
-	return lb.servers[lb.serverIndex]
+	return nil
 }
 
 func (lb *loadBalancerImpl) handleRequest (w http.ResponseWriter, r *http.Request) {
@@ -51,16 +65,50 @@ func (lb *loadBalancerImpl) handleRequest (w http.ResponseWriter, r *http.Reques
 	server.HandleRequest(w, r)
 }
 
+func (lb *loadBalancerImpl) updateServerHealth (serverPort string) {
+	healthCheckURL := fmt.Sprintf(serverHealthCheckURLPatten, serverPort)
+	resp, err := http.Get(healthCheckURL)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		fmt.Printf("Server %s is unhealthy\n", serverPort)
+		lb.isServerHealthy[serverPort] = false
+		return
+	}
+	fmt.Printf("Server %s is HEALTHY\n", serverPort)
+	lb.isServerHealthy[serverPort] = true
+}
+
+func (lb *loadBalancerImpl) PerformHealthChecks() {
+	for _, server := range lb.servers {
+		lb.updateServerHealth(server.GetName())
+	}
+}
+
 func (lb *loadBalancerImpl) Start(port string) {
+	
+	for _,server := range lb.servers {
+		server.Start()
+	}
+	
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", lb.handleRequest)
 	go func() {
 		http.ListenAndServe(":" + port, mux)
 	} ()
 
-	for _,server := range lb.servers {
-		server.Start()
-	}
+
+	go func() {
+		for {
+			select {
+			case <-lb.done:
+				fmt.Println("done called for round robin load balancer")
+				return
+			default:
+				lb.PerformHealthChecks()
+				time.Sleep(5 * time.Second)
+			}
+		}
+		
+	}()
 
 }
 
@@ -68,7 +116,7 @@ func (lb *loadBalancerImpl) Stop() {
 	for _,server := range lb.servers {
 		server.Stop()
 	}
-
+	lb.done <- struct{}{}
 }
 
 func (lb *loadBalancerImpl) AddServer(backendServer server.Server) {

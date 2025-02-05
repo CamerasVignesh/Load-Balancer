@@ -1,8 +1,8 @@
 package main
 
 import (
-	"load-balancer/lb/least_connection"
 	"fmt"
+	roundrobin "load-balancer/lb/round_robin"
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,7 +10,7 @@ import (
 
 // https://codingchallenges.fyi/challenges/challenge-load-balancer
 func main() {
-	lb := leastconnection.NewLeastConnectionLoadBalancer(3)
+	lb := roundrobin.NewRoundRobinLoadBalancer(3)
 	lb.Start("8080")
 
 	stopChan := make(chan os.Signal, 1)
